@@ -1,0 +1,19 @@
+name: Deploy Supabase Edge Functions
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/**'
+jobs:
+  deploy-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx supabase functions deploy --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+# Secrets necessários:
+#   SUPABASE_ACCESS_TOKEN — supabase.com/dashboard/account/tokens
+#   SUPABASE_PROJECT_REF  — ref do seu projeto (URL do dashboard: app.supabase.com/project/<ref>)
+# Gerado separado do deploy do frontend porque muda em cadência diferente —
+# só roda quando algo em supabase/functions/ muda (ver 'paths' acima).

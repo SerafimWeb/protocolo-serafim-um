@@ -1,0 +1,17 @@
+name: Build (destino de deploy não reconhecido automaticamente)
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      # TODO: o setup não reconheceu seu destino de deploy pela resposta dada.
+      # Troque este passo pelo deploy real — exemplos prontos em
+      # templates/deploy-templates/{vercel,netlify,hostinger-ftp,railway}.yml

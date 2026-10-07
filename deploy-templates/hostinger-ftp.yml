@@ -1,0 +1,29 @@
+name: Deploy (Hostinger via FTP)
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      - name: Deploy via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+        with:
+          server:    ${{ secrets.FTP_HOST }}
+          username:  ${{ secrets.FTP_USER }}
+          password:  ${{ secrets.FTP_PASS }}
+          local-dir: ./dist/
+          server-dir: ${{ secrets.FTP_REMOTE_DIR }}
+# Secrets necessários (Settings → Secrets and variables → Actions):
+#   FTP_HOST       — ftp.seudominio.com (hPanel → Avançado → FTP Accounts)
+#   FTP_USER       — usuário FTP
+#   FTP_PASS       — senha FTP
+#   FTP_REMOTE_DIR — caminho exato no servidor (ex: /public_html/ ou /domains/seudominio.com/public_html/)
+#                    CUIDADO: caminho errado aqui já causou incidente real documentado
+#                    no PROTOCOLO_SERAFIM_UM.md (R8) — confirme antes de rodar em produção.

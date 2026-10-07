@@ -1,0 +1,22 @@
+#!/bin/bash
+# Protocolo Serafim UM — bloqueia commit se ESTADO_ATUAL.md nao foi atualizado hoje
+MEMORY_DIR=".memory"   # <- ajuste para o nome da sua pasta de memoria, se mudou
+ESTADO="${MEMORY_DIR}/ESTADO_ATUAL.md"
+
+if [ ! -f "$ESTADO" ]; then
+  echo "PROTOCOLO VIOLADO: $ESTADO nao encontrado."
+  echo "   Crie o arquivo antes de commitar."
+  exit 1
+fi
+
+LAST_MOD=$(git log -1 --format="%ci" -- "$ESTADO" 2>/dev/null)
+TODAY=$(date +%Y-%m-%d)
+if [ -n "$LAST_MOD" ] && [[ "$LAST_MOD" != "$TODAY"* ]]; then
+  STAGED_COUNT=$(git diff --cached --name-only | wc -l)
+  if [ "$STAGED_COUNT" -gt 1 ]; then
+    echo "PROTOCOLO: $ESTADO nao foi atualizado hoje."
+    echo "   Atualize o estado do projeto antes de commitar mudancas significativas."
+    echo "   Para ignorar esta vez: git commit --no-verify"
+  fi
+fi
+exit 0

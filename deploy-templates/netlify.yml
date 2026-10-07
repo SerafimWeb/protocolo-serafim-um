@@ -1,0 +1,26 @@
+name: Deploy (Netlify)
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      - name: Deploy to Netlify
+        uses: nwtgck/actions-netlify@v3
+        with:
+          publish-dir: './dist'
+          production-deploy: true
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+# Secrets necessários (Settings → Secrets and variables → Actions):
+#   NETLIFY_AUTH_TOKEN — app.netlify.com/user/applications
+#   NETLIFY_SITE_ID    — site settings → General → Site details
+# Ajuste 'publish-dir' se seu build não gerar em ./dist (ex: Next.js usa ./out com export estático).
