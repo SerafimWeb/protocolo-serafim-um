@@ -427,11 +427,27 @@ Infra      → Clientes externos (supabase, stripe, etc.).
   // .env.example — só gera campos do que foi detectado; nunca sobrescreve
   const envDst = path.join(TARGET_DIR, '.env.example');
   if (detected.pkg && !exists(envDst)) {
+    // Variáveis que o NAVEGADOR lê precisam do prefixo do framework — sem
+    // ele, o valor chega como undefined e o app quebra sem erro nenhum.
+    // E o inverso é pior: chave secreta COM prefixo público vai parar no
+    // bundle que qualquer visitante baixa.
+    const pub = detected.hasNext ? 'NEXT_PUBLIC_' : detected.hasVite ? 'VITE_' : '';
     const lines = ['# Gerado pelo Protocolo Serafim UM — preencha os valores reais em .env (nunca commitado)', ''];
-    if (detected.hasSupabase) lines.push('SUPABASE_URL=', 'SUPABASE_ANON_KEY=', 'SUPABASE_SERVICE_ROLE_KEY=', '');
-    if (detected.hasStripe) lines.push('STRIPE_SECRET_KEY=', 'STRIPE_WEBHOOK_SECRET=', '');
+    if (pub) {
+      lines.push(`# Variáveis com ${pub} vão pro navegador (públicas). NUNCA coloque esse prefixo numa chave secreta.`, '');
+    }
+    if (detected.hasSupabase) {
+      lines.push(`${pub}SUPABASE_URL=`, `${pub}SUPABASE_ANON_KEY=`, '');
+      lines.push('# Secreta: só backend/Edge Functions. Ignora RLS — nunca no frontend, nunca com prefixo público.');
+      lines.push('SUPABASE_SERVICE_ROLE_KEY=', '');
+    }
+    if (detected.hasStripe) {
+      if (pub) lines.push(`${pub}STRIPE_PUBLISHABLE_KEY=`);
+      lines.push('# Secretas: só backend. Use sk_test_ até ir pra produção de verdade.');
+      lines.push('STRIPE_SECRET_KEY=', 'STRIPE_WEBHOOK_SECRET=', '');
+    }
     if (detected.hasResend) lines.push('RESEND_API_KEY=', '');
-    if (lines.length > 2) {
+    if (detected.hasSupabase || detected.hasStripe || detected.hasResend) {
       writeFile(envDst, lines.join('\n') + '\n');
       console.log(`  ${g('✓')} ${cy('.env.example')} gerado a partir da stack detectada`);
     }

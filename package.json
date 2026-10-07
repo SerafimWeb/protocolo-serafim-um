@@ -1,11 +1,9 @@
 {
   "name": "protocolo-serafim-um-setup",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Setup automático da versão gratuita (MIT) do Protocolo Serafim UM — memória persistente, deploy e health check gerados por detecção de stack. Pacote completo (WATCHDOG, auditoria, MCP Arsenal, enforcement, skills) vendido separadamente.",
   "main": "setup.js",
-  "bin": {
-    "protocolo-serafim-um-setup": "./setup.js"
-  },
+  "bin": "./setup.js",
   "scripts": {
     "setup": "node setup.js",
     "check": "node check-version.js"
