@@ -1,0 +1,51 @@
+# Publica protocolo-serafim-um-setup no npm sozinho quando a versão do
+# package.json muda. Sem token guardado em lugar nenhum: usa Trusted
+# Publishing (OIDC) — o npm confia neste workflow específico, configurado
+# uma vez em npmjs.com → pacote → Settings → Trusted Publisher.
+#
+# Este arquivo mora em SERAFIM13/protocolo-serafim-um/repo-publico/ e é
+# copiado pra cá pelo workflow release-protocolo do SERAFIM13. Edite lá.
+name: Publicar no npm
+
+on:
+  push:
+    branches: [main]
+    paths: ['package.json']
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Smoke test do instalador antes de publicar
+        run: |
+          node --check setup.js && node --check doctor.js && node --check check-version.js
+          mkdir -p /tmp/smoke && cd /tmp/smoke && git init -q
+          echo '{"name":"smoke","dependencies":{"next":"15","@supabase/supabase-js":"2"}}' > package.json
+          printf 'Smoke\nTeste CI\n\nVercel\n\n\n\n' | node "$GITHUB_WORKSPACE/setup.js"
+          for f in CLAUDE.md .smoke/ESTADO_ATUAL.md .smoke/DIAGNOSTICO.md .github/workflows/deploy.yml app/api/health/route.ts .env.example; do
+            test -f "$f" || { echo "::error::setup não gerou $f"; exit 1; }
+          done
+
+      - name: Publica só se esta versão ainda não existe no npm
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "$NAME@$VERSION já está no npm — nada a publicar."
+            exit 0
+          fi
+          npm install -g npm@latest
+          npm publish --access public
+          echo "::notice::$NAME@$VERSION publicado no npm"

@@ -1,17 +1,17 @@
 {
   "name": "protocolo-serafim-um-setup",
-  "version": "1.1.1",
-  "description": "Setup automático da versão gratuita (MIT) do Protocolo Serafim UM — memória persistente, deploy e health check gerados por detecção de stack. Pacote completo (WATCHDOG, auditoria, MCP Arsenal, enforcement, skills) vendido separadamente.",
+  "version": "1.2.0",
+  "description": "Faz as perguntas que quem programa com IA ainda não sabe fazer: doctor com nota 0-100 e pergunta pronta pra IA em cada problema, memória persistente, CLAUDE.md com checagens obrigatórias, deploy e health check gerados pela stack. Versão gratuita (MIT) do Protocolo Serafim UM.",
   "main": "setup.js",
   "bin": "./setup.js",
   "scripts": {
     "setup": "node setup.js",
     "check": "node check-version.js"
   },
-  "keywords": ["ai", "claude", "cursor", "protocol", "memory", "typescript"],
+  "keywords": ["ai", "claude", "claude-code", "cursor", "vibe-coding", "security", "doctor", "audit", "supabase", "memory", "typescript"],
   "license": "SEE LICENSE IN LICENSE",
   "engines": { "node": ">=16" },
-  "files": ["setup.js", "check-version.js", "VERSION", ".memory", "hooks", "deploy-templates", "health-templates", "CLAUDE.md", "LICENSE", "README.md"],
+  "files": ["setup.js", "doctor.js", "check-version.js", "VERSION", ".memory", "hooks", "deploy-templates", "health-templates", "CLAUDE.md", "LICENSE", "README.md"],
   "homepage": "https://serafimweb.com/serafim13/protocolo-um",
   "repository": {
     "type": "git",

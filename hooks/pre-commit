@@ -1,12 +1,27 @@
 #!/bin/bash
-# Protocolo Serafim UM — bloqueia commit se ESTADO_ATUAL.md nao foi atualizado hoje
+# Protocolo Serafim UM - lembra de atualizar o estado do projeto antes de commitar.
+#
+# Por padrao AVISA e deixa o commit passar: hook que trava vira --no-verify
+# e perde a confianca. Para BLOQUEAR de verdade:  PROTOCOLO_STRICT=1 git commit ...
 MEMORY_DIR=".memory"   # <- ajuste para o nome da sua pasta de memoria, se mudou
 ESTADO="${MEMORY_DIR}/ESTADO_ATUAL.md"
 
+warn_or_block() {
+  echo "$1"
+  if [ "${PROTOCOLO_STRICT:-0}" = "1" ]; then
+    echo "   (PROTOCOLO_STRICT=1: commit bloqueado)"
+    exit 1
+  fi
+}
+
 if [ ! -f "$ESTADO" ]; then
-  echo "PROTOCOLO VIOLADO: $ESTADO nao encontrado."
-  echo "   Crie o arquivo antes de commitar."
-  exit 1
+  warn_or_block "PROTOCOLO: $ESTADO nao encontrado (a pasta de memoria foi renomeada ou apagada?)."
+  exit 0
+fi
+
+# Estado ja vai neste commit: tudo certo.
+if git diff --cached --name-only | grep -qx "$ESTADO"; then
+  exit 0
 fi
 
 LAST_MOD=$(git log -1 --format="%ci" -- "$ESTADO" 2>/dev/null)
@@ -14,9 +29,7 @@ TODAY=$(date +%Y-%m-%d)
 if [ -n "$LAST_MOD" ] && [[ "$LAST_MOD" != "$TODAY"* ]]; then
   STAGED_COUNT=$(git diff --cached --name-only | wc -l)
   if [ "$STAGED_COUNT" -gt 1 ]; then
-    echo "PROTOCOLO: $ESTADO nao foi atualizado hoje."
-    echo "   Atualize o estado do projeto antes de commitar mudancas significativas."
-    echo "   Para ignorar esta vez: git commit --no-verify"
+    warn_or_block "PROTOCOLO: $ESTADO nao foi atualizado hoje. Atualize o estado do projeto antes de commitar mudancas significativas."
   fi
 fi
 exit 0

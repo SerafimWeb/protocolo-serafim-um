@@ -4,30 +4,27 @@
  *
  * Uso local:    node setup.js
  * Uso via npx:  npx protocolo-serafim-um-setup
+ *               npx protocolo-serafim-um-setup doctor    (só o diagnóstico)
+ *               npx protocolo-serafim-um-setup --check   (versão nova?)
  *
  * O que faz:
- *   1. Pergunta 5 coisas sobre o projeto
- *   2. Cria a pasta de memória com os arquivos preenchidos
- *   3. Copia o CLAUDE.md para a raiz
- *   4. Instala o git hook (se estiver num repositório git)
- *   5. Se WATCHDOG.tsx existir ao lado deste script, pergunta se instala
- *      (só está presente no pacote completo/pago — a versão gratuita
- *      publicada no npm não inclui esse arquivo, então esta etapa se
- *      autodesliga sozinha para quem instalou via npx).
- *   6. Detecta a stack do projeto (lê o package.json de quem está
- *      instalando) e, sem perguntar de novo: gera o workflow de deploy
- *      certo (Vercel/Netlify/Railway/Hostinger, pela resposta da pergunta
- *      4), gera o health check certo (Next.js/Express/Supabase Edge
- *      Function), gera `.env.example` com as variáveis da stack
- *      detectada, e cria/atualiza o `eslint.config.js` com as regras do
- *      protocolo (pacote completo). Nunca sobrescreve arquivo que já
- *      existe — gera ao lado com sufixo `-sugestao` quando há conflito.
- *   7. Se o Watchdog foi instalado nesta rodada, tenta montar
- *      automaticamente em `src/main.tsx`/`main.jsx` — só quando reconhece
- *      com confiança o formato (Vite+React padrão). Em qualquer outro
- *      caso, não toca no arquivo e imprime o snippet exato: editar
- *      arquivo de quem está instalando sem certeza é pior do que pedir
- *      2 linhas manuais.
+ *   1. Detecta a stack e o destino de deploy pelo próprio projeto e só
+ *      pergunta o que não dá pra descobrir (Enter aceita a sugestão).
+ *   2. Cria a pasta de memória — sem nunca sobrescrever arquivo que já
+ *      existe (rodar de novo não apaga o estado real do projeto).
+ *   3. Gera o CLAUDE.md a partir de templates/CLAUDE.md, com as "perguntas
+ *      certas" que a IA cumpre antes de agir. Se já havia um CLAUDE.md da
+ *      pessoa, não toca nele: grava o nosso ao lado pra IA fundir.
+ *   4. Instala o git hook (se estiver num repositório git).
+ *   5. Pacote completo: oferece o WATCHDOG.tsx (ausente no npm gratuito,
+ *      então a etapa se autodesliga) já com nome/stack preenchidos, e o
+ *      monta acrescentando um bloco dev-only no fim do main.tsx.
+ *   6. Gera workflow de deploy, health check e .env.example pela stack
+ *      detectada; pacote completo também liga o ESLint do protocolo. Nunca
+ *      sobrescreve — conflito vira arquivo `-sugestao` ao lado.
+ *   7. Roda o doctor: mostra a nota do projeto e grava o diagnóstico em
+ *      <memória>/DIAGNOSTICO.md (lido pela IA) e, com Watchdog, em
+ *      src/qa/doctor-report.json (aba Diagnóstico do painel).
  *
  * Suporta instalação 100% não-interativa (CI, scripts, outra IA
  * respondendo): se stdin não for um TTY, lê todas as respostas de uma vez
@@ -106,33 +103,124 @@ function copyFile(src, dst) {
   return true;
 }
 
-function readJsonSafe(p) {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
-}
-
 // ── TEMPLATES DIR (relativo a este script) ──
 const TEMPLATES_DIR = __dirname;
 const TARGET_DIR = process.cwd();
 
-// ── DETECÇÃO DE STACK ──
-// Lê o package.json do projeto ONDE o setup está rodando (não deste
-// pacote) pra decidir, sem perguntar, qual template de health/deploy
-// se aplica. Sem package.json (projeto não-Node ainda não iniciado):
-// tudo vira indefinido e os passos de infra avisam e pulam, nunca
-// adivinham às cegas.
-function detectStack() {
-  const pkg = readJsonSafe(path.join(TARGET_DIR, 'package.json'));
-  const deps = pkg ? { ...pkg.dependencies, ...pkg.devDependencies } : {};
-  return {
-    pkg,
-    hasNext: !!deps.next,
-    hasVite: !!deps.vite,
-    hasReact: !!deps.react,
-    hasExpress: !!deps.express,
-    hasSupabase: !!deps['@supabase/supabase-js'],
-    hasStripe: !!(deps.stripe || deps['@stripe/stripe-js']),
-    hasResend: !!deps.resend,
-  };
+// Detecção de stack mora no doctor (fonte única) — o setup usa a mesma,
+// pra os dois nunca discordarem sobre o que o projeto é.
+const doctor = require('./doctor.js');
+
+// ── ENFORCEMENT: ESLint ligado de verdade ──
+function packageManager() {
+  if (exists(path.join(TARGET_DIR, 'pnpm-lock.yaml'))) return { add: 'pnpm add', dev: 'pnpm add -D' };
+  if (exists(path.join(TARGET_DIR, 'yarn.lock'))) return { add: 'yarn add', dev: 'yarn add -D' };
+  if (exists(path.join(TARGET_DIR, 'bun.lockb')) || exists(path.join(TARGET_DIR, 'bun.lock'))) return { add: 'bun add', dev: 'bun add -d' };
+  return { add: 'npm install', dev: 'npm install -D' };
+}
+
+function installDeps(cmd, pkgs) {
+  if (process.env.PROTOCOLO_SKIP_INSTALL) return false; // testes de CI: não baixa nada da rede
+  try {
+    require('child_process').execSync(`${cmd} ${pkgs.join(' ')}`, { cwd: TARGET_DIR, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Liga as regras do protocolo no ESLint do projeto, respeitando o formato
+// dele (ESM ou CommonJS). Sem ESLint instalado: instala e cria a config.
+// Com config existente: acrescenta as regras sem remover nada; se o
+// formato não for reconhecido com segurança, não edita e diz o que fazer.
+function wireEslint(rulesSrc, detected) {
+  const pkg = detected.pkg;
+  const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+  const pm = packageManager();
+  let hasEslint = !!deps.eslint;
+  let hasTsEslint = !!(deps['typescript-eslint'] || deps['@typescript-eslint/eslint-plugin']);
+
+  const existingConfig = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs']
+    .map(f => path.join(TARGET_DIR, f)).find(exists);
+
+  if (!hasEslint && !existingConfig) {
+    const extra = detected.hasTypeScript ? 'typescript-eslint' : '@eslint/js';
+    if (!installDeps(pm.dev, ['eslint', extra])) {
+      console.log(`  ${y('!')} Não consegui instalar o ESLint — rode: ${cy(`${pm.dev} eslint ${extra}`)} e o setup de novo.`);
+      return;
+    }
+    hasEslint = true;
+    hasTsEslint = detected.hasTypeScript;
+  }
+
+  // Grava a versão das regras que este projeto consegue rodar: as regras
+  // @typescript-eslint/* só entram se o plugin existir — sem ele, o ESLint
+  // inteiro para com "plugin não encontrado".
+  delete require.cache[require.resolve(rulesSrc)];
+  const allRules = require(rulesSrc);
+  const usable = allRules.filter(block => hasTsEslint || !Object.keys(block.rules || {}).some(r => r.startsWith('@typescript-eslint/')));
+  writeFile(path.join(TARGET_DIR, 'eslint-serafim-rules.cjs'),
+    '// Protocolo Serafim UM — regras do protocolo como erro de lint. Gerado pelo setup.\n' +
+    `module.exports = ${JSON.stringify(usable, null, 2)};\n`);
+
+  const isEsmFile = (file) => file.endsWith('.mjs') || (!file.endsWith('.cjs') && pkg.type === 'module');
+
+  if (existingConfig) {
+    let cfg = fs.readFileSync(existingConfig, 'utf8');
+    const name = path.basename(existingConfig);
+    if (cfg.includes('eslint-serafim-rules')) return;
+    const openers = [
+      /(export default\s*\[)/,
+      /(module\.exports\s*=\s*\[)/,
+      /((?:defineConfig|tseslint\.config)\(\s*\[?)/,
+      /(const\s+eslintConfig\s*=\s*\[)/,
+    ];
+    const opener = openers.find(re => re.test(cfg));
+    if (!opener) {
+      console.log(`  ${y('!')} Não reconheci o formato de ${cy(name)} — regras gravadas em ${cy('eslint-serafim-rules.cjs')}.`);
+      console.log(d(`    Peça à sua IA: "Adicione as regras de eslint-serafim-rules.cjs ao ${name} sem remover nada."`));
+      return;
+    }
+    cfg = cfg.replace(opener, '$1\n  ...serafimRules,');
+    const importLine = isEsmFile(existingConfig)
+      ? "import serafimRules from './eslint-serafim-rules.cjs';"
+      : "const serafimRules = require('./eslint-serafim-rules.cjs');";
+    const lastImport = [...cfg.matchAll(/^(?:import .+|const .+ = require\(.+\);?)$/gm)].pop();
+    cfg = lastImport
+      ? cfg.slice(0, lastImport.index + lastImport[0].length) + '\n' + importLine + cfg.slice(lastImport.index + lastImport[0].length)
+      : importLine + '\n' + cfg;
+    fs.writeFileSync(existingConfig, cfg, 'utf8');
+    console.log(`  ${g('✓')} ${cy(name)} atualizado com as regras do protocolo (nada removido)`);
+  } else {
+    const file = path.join(TARGET_DIR, 'eslint.config.js');
+    const esm = isEsmFile(file);
+    const ignores = "{ ignores: ['dist', 'build', '.next', 'out', 'coverage'] }";
+    let body;
+    if (hasTsEslint) {
+      body = esm
+        ? `import tseslint from 'typescript-eslint';\nimport serafimRules from './eslint-serafim-rules.cjs';\n\nexport default tseslint.config(\n  ${ignores},\n  ...tseslint.configs.recommended,\n  ...serafimRules,\n);\n`
+        : `const tseslint = require('typescript-eslint');\nconst serafimRules = require('./eslint-serafim-rules.cjs');\n\nmodule.exports = tseslint.config(\n  ${ignores},\n  ...tseslint.configs.recommended,\n  ...serafimRules,\n);\n`;
+    } else {
+      body = esm
+        ? `import js from '@eslint/js';\nimport serafimRules from './eslint-serafim-rules.cjs';\n\nexport default [\n  ${ignores},\n  js.configs.recommended,\n  ...serafimRules,\n];\n`
+        : `const js = require('@eslint/js');\nconst serafimRules = require('./eslint-serafim-rules.cjs');\n\nmodule.exports = [\n  ${ignores},\n  js.configs.recommended,\n  ...serafimRules,\n];\n`;
+    }
+    writeFile(file, body);
+    console.log(`  ${g('✓')} ESLint configurado (${cy('eslint.config.js')}) com as regras do protocolo`);
+  }
+
+  // Script "lint": é o que o CI do protocolo chama (npm run lint --if-present).
+  if (hasEslint && !(pkg.scripts && pkg.scripts.lint)) {
+    try {
+      const pkgPath = path.join(TARGET_DIR, 'package.json');
+      const fresh = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      fresh.scripts = { ...(fresh.scripts || {}), lint: 'eslint .' };
+      fs.writeFileSync(pkgPath, JSON.stringify(fresh, null, 2) + '\n', 'utf8');
+      console.log(`  ${g('✓')} Script ${cy('npm run lint')} adicionado ao package.json`);
+    } catch {
+      /* package.json ilegível: o resto continua valendo, o lint só não fica no script */
+    }
+  }
 }
 
 // ── SELEÇÃO DE TEMPLATE DE DEPLOY ──
@@ -151,25 +239,38 @@ function pickDeployTemplate(deployAnswer) {
 
 // ── MAIN ──
 async function main() {
-  if (process.argv.includes('--check') || process.argv.includes('--version')) {
+  const args = process.argv.slice(2);
+  if (args.includes('--check') || args.includes('--version')) {
     require('./check-version.js');
     return;
   }
+  if (args[0] === 'doctor') {
+    doctor.cli(args.slice(1));
+    return;
+  }
+
+  // Detecta antes de perguntar: o que dá pra descobrir sozinho vira
+  // resposta padrão (Enter confirma) — quem está começando muitas vezes
+  // não sabe responder "qual sua stack?".
+  const detected = doctor.detectStack(TARGET_DIR);
+  const pkgName = detected.pkg && typeof detected.pkg.name === 'string' ? detected.pkg.name : '';
 
   console.log('');
   console.log(b(cy('  ╔═══════════════════════════════════════════╗')));
   console.log(b(cy('  ║    PROTOCOLO SERAFIM UM — Setup            ║')));
-  console.log(b(cy('  ║    Sistema de Memória Persistente          ║')));
+  console.log(b(cy('  ║    Memória + infraestrutura + diagnóstico  ║')));
   console.log(b(cy('  ╚═══════════════════════════════════════════╝')));
   console.log('');
-  console.log(d('  Responda 5 perguntas. Em 60 segundos, o protocolo está rodando.'));
+  console.log(d('  Responda o que eu não consigo descobrir sozinho. Enter aceita a sugestão.'));
   console.log('');
 
+  const withDefault = (answer, fallback) => (answer.trim() || fallback || '').trim();
+
   // ── PERGUNTAS ──
-  const name = await ask(`  ${cy('1/5')} Nome do projeto ${d('(ex: Argus, VidGi, MeuApp)')}: `);
+  const name = withDefault(await ask(`  ${cy('1/5')} Nome do projeto ${d(pkgName ? `(Enter: ${pkgName})` : '(ex: Argus, VidGi, MeuApp)')}: `), pkgName) || 'Meu Projeto';
   const purpose = await ask(`  ${cy('2/5')} O que resolve e para quem ${d('(uma frase)')}: `);
-  const stack = await ask(`  ${cy('3/5')} Stack ${d('(ex: React + Vite + TypeScript + Supabase)')}: `);
-  const deploy = await ask(`  ${cy('4/5')} Deploy ${d('(ex: Vercel / Railway / Hostinger FTP)')}: `);
+  const stack = withDefault(await ask(`  ${cy('3/5')} Stack ${d(detected.label ? `(detectei: ${detected.label} — Enter confirma)` : '(ex: React + Vite + TypeScript + Supabase)')}: `), detected.label);
+  const deploy = withDefault(await ask(`  ${cy('4/5')} Onde vai publicar ${d(detected.deploy ? `(detectei: ${detected.deploy} — Enter confirma)` : '(Vercel / Netlify / Railway / Hostinger — ou Enter se não sabe)')}: `), detected.deploy);
   const restrictions = await ask(`  ${cy('5/5')} Alguma restrição técnica? ${d('(Enter para pular)')}: `);
 
   console.log('');
@@ -274,67 +375,47 @@ estão no Protocolo Serafim UM (PROTOCOLO_SERAFIM_UM.md).
 *Adicione aqui regras específicas que emergirem deste projeto.*
 `;
 
-  // ── CRIAR CLAUDE.md ──
-  const claudeMd = `# CLAUDE.md — Protocolo de Operação
-
-> Este arquivo é lido automaticamente por Claude Code, Cursor e agentes compatíveis.
-> NÃO remova. Ele é a lei do projeto para qualquer IA que trabalhe aqui.
-
-## PASSO ZERO — OBRIGATÓRIO ANTES DE QUALQUER AÇÃO
-
-1. Ler \`${memFolder}/IDENTITY.md\` — quem é este projeto, qual é o stack, quais são as restrições
-2. Ler \`${memFolder}/ESTADO_ATUAL.md\` — onde a última sessão parou e o que vem a seguir
-3. Ler \`${memFolder}/ROADMAP.md\` — visão macro do projeto
-
-Somente então iniciar o trabalho solicitado.
-
-## IDENTIDADE DO PROJETO
-
-O contexto completo está em \`${memFolder}/IDENTITY.md\`.
-
-Projeto: ${name}
-Propósito: ${purpose}
-Stack: ${stack}
-
-## REGRAS ABSOLUTAS
-
-- TypeScript Strict. Zero \`any\` implícito. Inputs externos validados com Zod.
-- Sem secrets no código. Nunca em arquivo versionado.
-- Sem arquivos duplicados. Versionar é função do Git.
-- RLS em tabelas com dados de usuário.
-- Nenhuma migration sem script DOWN.
-- Performance Budget: Bundle < 500KB. LCP < 2.5s.
-
-## PADRÕES DE ARQUITETURA
-
-\`\`\`
-UI         → Componentes puros. Zero lógica de negócio.
-Lógica     → Hooks e services. Testáveis de forma isolada.
-Infra      → Clientes externos (supabase, stripe, etc.).
-\`\`\`
-
-## ENCERRAMENTO DE SESSÃO
-
-- [ ] \`${memFolder}/ESTADO_ATUAL.md\` reflete o estado real pós-sessão?
-- [ ] \`${memFolder}/HISTORICO_DE_DECISOES.md\` tem nova entrada?
-- [ ] Nenhum secret exposto?
-- [ ] Build passa sem erros?
-
----
-*CLAUDE.md gerado pelo Protocolo Serafim UM em ${today}*
-`;
+  // ── CRIAR CLAUDE.md (fonte única: templates/CLAUDE.md) ──
+  const claudeTemplate = fs.readFileSync(path.join(TEMPLATES_DIR, 'CLAUDE.md'), 'utf8');
+  const claudeMd = claudeTemplate
+    .replace(/\{\{MEM\}\}/g, memFolder)
+    .replace(/\{\{NAME\}\}/g, name)
+    .replace(/\{\{PURPOSE\}\}/g, purpose || '(propósito não informado no setup)')
+    .replace(/\{\{STACK\}\}/g, stack || '(stack não informada)')
+    .replace(/\{\{TODAY\}\}/g, today);
 
   // ── ESCREVER ARQUIVOS ──
-  console.log(`  ${g('✓')} Criando ${cy(memFolder + '/')}...`);
-  writeFile(path.join(memPath, 'IDENTITY.md'), identity);
-  writeFile(path.join(memPath, 'ESTADO_ATUAL.md'), estado);
-  writeFile(path.join(memPath, 'HISTORICO_DE_DECISOES.md'), historico);
-  writeFile(path.join(memPath, 'ROADMAP.md'), roadmap);
-  writeFile(path.join(memPath, 'PROTOCOLO_UNIVERSAL.md'), protocolo);
-  console.log(`    ${d('IDENTITY.md, ESTADO_ATUAL.md, HISTORICO_DE_DECISOES.md, ROADMAP.md, PROTOCOLO_UNIVERSAL.md')}`);
+  // Memória existente NUNCA é sobrescrita: rodar o setup de novo num
+  // projeto que já usa o protocolo não pode apagar o estado real dele.
+  console.log(`  ${g('✓')} Pasta de memória ${cy(memFolder + '/')}`);
+  const memFiles = [
+    ['IDENTITY.md', identity], ['ESTADO_ATUAL.md', estado], ['HISTORICO_DE_DECISOES.md', historico],
+    ['ROADMAP.md', roadmap], ['PROTOCOLO_UNIVERSAL.md', protocolo],
+  ];
+  const created = [];
+  const kept = [];
+  for (const [file, content] of memFiles) {
+    const p = path.join(memPath, file);
+    if (exists(p)) { kept.push(file); continue; }
+    writeFile(p, content);
+    created.push(file);
+  }
+  if (created.length) console.log(`    ${d('criados: ' + created.join(', '))}`);
+  if (kept.length) console.log(`    ${d('mantidos (já existiam, não toquei): ' + kept.join(', '))}`);
 
-  console.log(`  ${g('✓')} Escrevendo ${cy('CLAUDE.md')} na raiz...`);
-  writeFile(path.join(TARGET_DIR, 'CLAUDE.md'), claudeMd);
+  // CLAUDE.md: só substitui se foi gerado por nós antes (upgrade). Se a
+  // pessoa já tinha um próprio, o nosso vai ao lado e a IA faz a fusão.
+  const claudePath = path.join(TARGET_DIR, 'CLAUDE.md');
+  const existingClaude = exists(claudePath) ? fs.readFileSync(claudePath, 'utf8') : null;
+  if (existingClaude === null || existingClaude.includes('Protocolo Serafim UM')) {
+    writeFile(claudePath, claudeMd);
+    console.log(`  ${g('✓')} ${cy('CLAUDE.md')} ${existingClaude === null ? 'criado' : 'atualizado'} — com as "perguntas certas" que a IA cumpre antes de agir`);
+  } else {
+    const altPath = path.join(TARGET_DIR, 'CLAUDE.protocolo-serafim.md');
+    writeFile(altPath, claudeMd);
+    console.log(`  ${y('!')} Você já tinha um CLAUDE.md — não toquei nele. O do protocolo está em ${cy('CLAUDE.protocolo-serafim.md')}.`);
+    console.log(d('    Peça à sua IA: "Junte CLAUDE.protocolo-serafim.md ao meu CLAUDE.md sem perder nada do meu, e apague o arquivo extra."'));
+  }
 
   // ── GIT HOOK ──
   const hookSrc = path.join(TEMPLATES_DIR, 'hooks', 'pre-commit');
@@ -345,9 +426,28 @@ Infra      → Clientes externos (supabase, stripe, etc.).
     if (exists(hookSrc)) {
       let hookContent = fs.readFileSync(hookSrc, 'utf8');
       hookContent = hookContent.replace(/MEMORY_DIR="\.[^"]*"/, `MEMORY_DIR="${memFolder}"`);
-      writeFile(hookDst, hookContent);
-      try { fs.chmodSync(hookDst, '755'); } catch {}
-      console.log(`  ${g('✓')} Git hook instalado em ${cy('.git/hooks/pre-commit')} ${d(`(MEMORY_DIR="${memFolder}")`)}`);
+      // Nunca destrói hook que a pessoa já tinha: só substitui o nosso (upgrade).
+      const existingHook = exists(hookDst) ? fs.readFileSync(hookDst, 'utf8') : null;
+      let customHooksPath = '';
+      try {
+        customHooksPath = require('child_process')
+          .execSync('git config core.hooksPath', { cwd: TARGET_DIR, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      } catch { /* sem core.hooksPath configurado: o normal */ }
+      try {
+        if (existingHook !== null && !existingHook.includes('Protocolo Serafim UM')) {
+          console.log(`  ${y('!')} Você já tem um hook pre-commit próprio — não toquei nele.`);
+          console.log(d('    Peça à sua IA: "Inclua no meu pre-commit o aviso de atualizar o ESTADO_ATUAL.md do protocolo."'));
+        } else if (customHooksPath) {
+          console.log(`  ${y('!')} Seu git usa core.hooksPath (${customHooksPath}, ex: Husky) — hook em .git/hooks não rodaria. Não instalei.`);
+          console.log(d('    Peça à sua IA: "Adicione ao hook pre-commit de ' + customHooksPath + ' o aviso de atualizar o ESTADO_ATUAL.md."'));
+        } else {
+          writeFile(hookDst, hookContent);
+          try { fs.chmodSync(hookDst, '755'); } catch { /* Windows: o bit de execução não existe */ }
+          console.log(`  ${g('✓')} Git hook instalado em ${cy('.git/hooks/pre-commit')} ${d(`(avisa se esquecer o ${memFolder}/ESTADO_ATUAL.md; PROTOCOLO_STRICT=1 passa a bloquear)`)}`);
+        }
+      } catch (err) {
+        console.log(`  ${y('!')} Não consegui instalar o git hook (${err instanceof Error ? err.message : String(err)}) — o resto do setup está ok.`);
+      }
     } else {
       console.log(`  ${y('!')} Hook template não encontrado em templates/hooks/pre-commit — instale manualmente.`);
     }
@@ -363,8 +463,26 @@ Infra      → Clientes externos (supabase, stripe, etc.).
     const watchdogAnswer = await ask(`\n  ${cy('?')} Instalar WATCHDOG.tsx em src/qa/Watchdog.tsx? ${d('[s/N]')}: `);
     const watchdogInstall = watchdogAnswer.trim().toLowerCase();
     if (watchdogInstall === 's' || watchdogInstall === 'sim' || watchdogInstall === 'y') {
-      copyFile(watchdogSrc, watchdogDst);
-      console.log(`  ${g('✓')} WATCHDOG instalado em ${cy('src/qa/Watchdog.tsx')}`);
+      // Já sai configurado com o nome e a stack reais — nada pra editar à mão.
+      const stackList = (stack || '').split('+').map(s => s.trim()).filter(Boolean);
+      const wd = fs.readFileSync(watchdogSrc, 'utf8')
+        .replace("name: 'MEU PROJETO'", `name: ${JSON.stringify(name)}`)
+        .replace("stack: ['React', 'TypeScript', 'Tailwind']", `stack: ${JSON.stringify(stackList.length ? stackList : ['React'])}`);
+      writeFile(watchdogDst, wd);
+      copyFile(path.join(TEMPLATES_DIR, 'watchdog.css'), path.join(TARGET_DIR, 'src', 'qa', 'watchdog.css'));
+      console.log(`  ${g('✓')} WATCHDOG instalado em ${cy('src/qa/Watchdog.tsx')} ${d('(nome e stack já preenchidos)')}`);
+
+      // O painel usa lucide-react (ícones). Sem ela, o import quebra o app
+      // em dev — instala com o gerenciador que o projeto já usa.
+      const deps = detected.pkg ? { ...(detected.pkg.dependencies || {}), ...(detected.pkg.devDependencies || {}) } : {};
+      if (detected.pkg && !deps['lucide-react']) {
+        const pm = packageManager();
+        if (installDeps(pm.add, ['lucide-react'])) {
+          console.log(`  ${g('✓')} Dependência do painel instalada: ${cy('lucide-react')}`);
+        } else {
+          console.log(`  ${y('!')} Não consegui instalar lucide-react — rode: ${cy(`${pm.add} lucide-react`)}`);
+        }
+      }
     }
   }
   const watchdogInstalled = exists(watchdogDst);
@@ -372,7 +490,6 @@ Infra      → Clientes externos (supabase, stripe, etc.).
   // ── FASE 2 — INFRAESTRUTURA (deploy, health check, .env.example) ──
   console.log('');
   console.log(b('  Infraestrutura:'));
-  const detected = detectStack();
 
   // Deploy — só escreve se não existir workflow nenhum ainda (nunca
   // sobrescreve um pipeline de deploy que a pessoa já tem rodando).
@@ -456,83 +573,73 @@ Infra      → Clientes externos (supabase, stripe, etc.).
   // Enforcement pack (ESLint) — só existe no pacote pago (mesmo padrão de
   // autodesligamento do Watchdog: ausente no npm gratuito).
   const eslintRulesSrc = path.join(TEMPLATES_DIR, '..', 'enforcement', 'eslint-serafim-rules.cjs');
-  if (exists(eslintRulesSrc)) {
-    const flatConfigPaths = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs']
-      .map(f => path.join(TARGET_DIR, f));
-    const existingFlatConfig = flatConfigPaths.find(exists);
-    const rulesDst = path.join(TARGET_DIR, 'eslint-serafim-rules.cjs');
-    copyFile(eslintRulesSrc, rulesDst);
+  if (exists(eslintRulesSrc) && detected.pkg) {
+    wireEslint(eslintRulesSrc, detected);
+  }
 
-    if (existingFlatConfig) {
-      let cfg = fs.readFileSync(existingFlatConfig, 'utf8');
-      if (!cfg.includes('eslint-serafim-rules')) {
-        const marker = /(export default\s*\[|module\.exports\s*=\s*\[)/;
-        if (marker.test(cfg)) {
-          cfg = cfg.replace(marker, `$1\n  require('./eslint-serafim-rules.cjs'),`);
-          fs.writeFileSync(existingFlatConfig, cfg, 'utf8');
-          console.log(`  ${g('✓')} ${cy(path.basename(existingFlatConfig))} atualizado com as regras do protocolo`);
-        } else {
-          console.log(`  ${y('!')} ${cy(path.basename(existingFlatConfig))} existe mas não reconheci o formato — regras copiadas pra ${cy('eslint-serafim-rules.cjs')}, importe manualmente.`);
-        }
+  // Watchdog auto-mount — ACRESCENTA um bloco no fim do main.tsx em vez de
+  // editar o JSX existente: funciona com qualquer formato de arquivo e não
+  // mexe em nada que já estava lá. O `if (import.meta.env.DEV)` faz o
+  // painel (e o relatório do doctor que ele mostra) nunca entrar no build
+  // de produção — o PIN fica no JS do cliente, então não é proteção.
+  if (watchdogInstalled) {
+    const mainPath = ['src/main.tsx', 'src/main.jsx'].map(f => path.join(TARGET_DIR, f)).find(exists);
+    const reactOk = !detected.reactMajor || detected.reactMajor >= 18;
+    if (mainPath && reactOk) {
+      const mainSrc = fs.readFileSync(mainPath, 'utf8');
+      if (!mainSrc.includes('qa/Watchdog')) {
+        const block = [
+          '',
+          '// Protocolo Serafim UM — Watchdog (Shift+D). Só existe em desenvolvimento:',
+          '// o if abaixo some do build de produção, junto com o painel.',
+          'if (import.meta.env.DEV) {',
+          "  Promise.all([import('./qa/Watchdog'), import('react-dom/client')]).then(([{ Watchdog }, { createRoot }]) => {",
+          "    const host = document.createElement('div');",
+          "    host.id = 'serafim-watchdog';",
+          '    document.body.appendChild(host);',
+          '    createRoot(host).render(<Watchdog />);',
+          '  });',
+          '}',
+          '',
+        ].join('\n');
+        fs.writeFileSync(mainPath, mainSrc.replace(/\s*$/, '\n') + block, 'utf8');
+        console.log(`  ${g('✓')} WATCHDOG montado em ${cy(path.relative(TARGET_DIR, mainPath))} ${d('(só em dev · Shift+D · PIN 2026)')}`);
       }
     } else {
-      writeFile(path.join(TARGET_DIR, 'eslint.config.js'), `module.exports = [require('./eslint-serafim-rules.cjs')];\n`);
-      console.log(`  ${g('✓')} ${cy('eslint.config.js')} criado com as regras do protocolo (projeto não tinha nenhum)`);
+      console.log(`  ${y('!')} Não achei src/main.tsx (ou o React é anterior ao 18) — peça à sua IA:`);
+      console.log(d('    "Monte o componente de src/qa/Watchdog.tsx no app, só em desenvolvimento (import.meta.env.DEV)."'));
     }
   }
 
-  // Watchdog auto-mount — só tenta se foi instalado nesta rodada. Só
-  // edita main.tsx se o padrão for um dos dois formatos mais comuns do
-  // Vite+React; em qualquer outro caso, não toca no arquivo e imprime o
-  // snippet exato — corromper o primeiro contato da pessoa com o produto
-  // é pior do que pedir 2 linhas manuais.
-  if (watchdogInstalled) {
-    const mainCandidates = ['src/main.tsx', 'src/main.jsx'].map(f => path.join(TARGET_DIR, f));
-    const mainPath = mainCandidates.find(exists);
-    if (mainPath) {
-      let mainSrc = fs.readFileSync(mainPath, 'utf8');
-      const alreadyWired = mainSrc.includes('Watchdog');
-      const patterns = [
-        { re: /(<StrictMode>\s*)(<App\s*\/>)(\s*<\/StrictMode>)/, replace: '$1$2{import.meta.env.DEV && <Watchdog />}$3' },
-        { re: /(render\(\s*)(<App\s*\/>)(\s*\))/, replace: '$1<>$2{import.meta.env.DEV && <Watchdog />}</>$3' },
-      ];
-      const match = patterns.find(p => p.re.test(mainSrc));
-      if (!alreadyWired && match) {
-        mainSrc = mainSrc.replace(match.re, match.replace);
-        if (!/import\s*\{\s*Watchdog\s*\}/.test(mainSrc)) {
-          mainSrc = mainSrc.replace(/^(import [^\n]+\n)/, `$1import { Watchdog } from './qa/Watchdog';\n`);
-        }
-        fs.writeFileSync(mainPath, mainSrc, 'utf8');
-        console.log(`  ${g('✓')} WATCHDOG montado automaticamente em ${cy(path.relative(TARGET_DIR, mainPath))} ${d('(Shift+D para abrir · PIN: 2026)')}`);
-      } else if (!alreadyWired) {
-        console.log(`  ${y('!')} Não reconheci o formato de ${cy(path.relative(TARGET_DIR, mainPath))} com segurança — monte manualmente:`);
-        console.log(d("    import { Watchdog } from './qa/Watchdog';  →  <Watchdog />  junto do <App />"));
-      }
-    } else {
-      console.log(`  ${y('!')} Não achei src/main.tsx ou src/main.jsx — monte o Watchdog manualmente:`);
-      console.log(d("    import { Watchdog } from './qa/Watchdog';  →  <Watchdog />  →  Shift+D · PIN: 2026"));
-    }
+  // ── FASE 3 — DIAGNÓSTICO (doctor) ──
+  // O setup termina com a nota do projeto: a pessoa sai sabendo o que
+  // corrigir, e a IA recebe o mesmo relatório em <memória>/DIAGNOSTICO.md.
+  console.log('');
+  console.log(b('  Diagnóstico do projeto:'));
+  try {
+    const report = doctor.runDoctor(TARGET_DIR);
+    doctor.writeReports(TARGET_DIR, report);
+    doctor.printReport(report, { compact: true });
+  } catch (err) {
+    console.log(`  ${y('!')} O diagnóstico não rodou (${err instanceof Error ? err.message : String(err)}) — o resto do setup está ok.`);
   }
 
   // ── RESUMO ──
-  console.log('');
   console.log(d('  ────────────────────────────────────────────'));
   console.log('');
   console.log(b(`  ${g('✓')} Protocolo ativo em ${cy(name)}`));
   console.log('');
-  console.log(`  Pasta de memória : ${cy(memFolder + '/')}`);
-  console.log(`  CLAUDE.md        : ${cy('CLAUDE.md')}`);
-  if (isGit) console.log(`  Git hook         : ${cy('.git/hooks/pre-commit')}`);
+  console.log(b('  Próximo passo — abra sua IA e cole:'));
+  console.log(cy('     "Leia o CLAUDE.md e o ' + memFolder + '/DIAGNOSTICO.md. Me diga o que entendeu do'));
+  console.log(cy('      projeto e qual problema do diagnóstico devemos corrigir primeiro."'));
   console.log('');
-  console.log(b('  Próximos passos:'));
-  console.log(`  ${cy('1.')} Abra sua IA e diga:`);
-  console.log(d('     "Leia o CLAUDE.md e me diga o que você entendeu sobre este projeto."'));
-  console.log(`  ${cy('2.')} Se a resposta vier com o contexto correto → você está operando.`);
+  console.log(d('  Diagnóstico de novo, a qualquer momento:  npx protocolo-serafim-um-setup doctor'));
   console.log('');
-  if (!exists(watchdogDst)) {
-    console.log(d('  Isto instalou a versão gratuita (MIT). O pacote completo adiciona'));
-    console.log(d('  WATCHDOG.tsx, módulos de auditoria, MCP Arsenal e o checklist de 47'));
-    console.log(d('  itens: https://serafimweb.com/serafim13/protocolo-um'));
+  if (!watchdogInstalled) {
+    console.log(d('  Versão gratuita (MIT). O pacote completo mostra este diagnóstico dentro do'));
+    console.log(d('  app (Watchdog, Shift+D), traz o enforcement pack que quebra o build quando'));
+    console.log(d('  uma regra é violada, skills prontas e os módulos de auditoria:'));
+    console.log(d('  https://serafimweb.com/serafim13/protocolo-um'));
     console.log('');
   }
 }
