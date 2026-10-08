@@ -82,6 +82,35 @@ const DEPRECATED_MODELS = new Set([
 
 const SCAN_BUDGET_MS = 90_000;
 
+const STRIPE_EVT = '(?:checkout\\.session\\.completed|payment_intent\\.succeeded|invoice\\.paid)';
+const STRIPE_EVENT_HANDLED_RE = new RegExp(
+  `\\bcase\\s+["'\`]${STRIPE_EVT}["'\`]|\\.type\\s*[!=]==?\\s*["'\`]${STRIPE_EVT}["'\`]|["'\`]${STRIPE_EVT}["'\`]\\s*:`,
+);
+
+// O padrão está dentro de comentário ou de texto entre aspas? (um scanner de
+// segurança cita `eval(` o tempo todo nos seus próprios padrões de detecção.)
+// Heurística por linha: comentário de linha/bloco, ou aspas de abertura sem fechamento
+// antes do ponto. Template literal que atravessa linhas conta como código (na dúvida,
+// avisa a mais, nunca a menos).
+function inCommentOrString(text, index) {
+  const start = text.lastIndexOf('\n', index - 1) + 1;
+  const before = text.slice(start, index);
+  if (/^\s*(\/\/|\*|\/\*|#)/.test(before)) return true;
+  let quote = null; // aspas abertas no ponto em que o padrão aparece
+  for (let i = 0; i < before.length; i++) {
+    const c = before[i];
+    if (quote) {
+      if (c === '\\') i++;            // escape: pula o próximo caractere
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'" || c === '`') {
+      quote = c;
+    } else if (c === '/' && before[i + 1] === '/') {
+      return true;                    // resto da linha é comentário
+    }
+  }
+  return quote !== null;
+}
+
 // Texto que vem do disco (nome de arquivo, valor de variável) é DADO, nunca
 // instrução: tira caractere de controle (sequências ANSI que mexem no terminal,
 // quebras de linha que injetariam texto no DIAGNOSTICO.md que a IA lê) e limita o tamanho.
@@ -216,6 +245,7 @@ function analyzeSupabaseMigrations(texts) {
   const tables = new Map();   // nome -> { rls: boolean }
   const policies = new Map(); // "tabela.policy" -> { bare: boolean }
   let dynamic = false;
+  let dynamicPolicies = false;
   const Q = '(?:"?(\\w+)"?\\s*\\.\\s*)?"?(\\w+)"?'; // [schema.]nome, com ou sem aspas
   const inPublic = (schema) => !schema || schema.toLowerCase() === 'public';
   const bareUid = (sql) => /auth\.uid\(\)/i.test(sql.replace(/\(\s*select\s+auth\.uid\(\)\s*\)/gi, ''));
@@ -223,6 +253,9 @@ function analyzeSupabaseMigrations(texts) {
   for (const raw of texts) {
     const sql = raw.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
     if (/execute[\s\S]{0,300}row\s+level\s+security|format\s*\([^)]*row\s+level\s+security/i.test(sql)) dynamic = true;
+    // Migration que varre `pg_policies` e recria policies em loop (o conserto clássico
+    // de auth_rls_initplan): o estado final das policies não está no texto.
+    if (/pg_policies/i.test(sql) && /\bexecute\b|\bformat\s*\(/i.test(sql)) dynamicPolicies = true;
 
     for (const stmtRaw of sql.split(';')) {
       const stmt = stmtRaw.trim();
@@ -256,6 +289,7 @@ function analyzeSupabaseMigrations(texts) {
     noRls: [...tables].filter(([, t]) => !t.rls).map(([n]) => n),
     uidPerRow: [...policies].filter(([, p]) => p.bare).map(([k]) => k),
     dynamic,
+    dynamicPolicies,
   };
 }
 
@@ -275,6 +309,8 @@ const isBuiltAsset = (rel) => /\.min\.(js|css)$/.test(rel) || /(^|\/)assets\/[^/
 // configs de build rodam fora do navegador: ler uma variável ali não a expõe.
 const isBrowserSide = (rel) =>
   !/^(scripts|supabase|server|backend|api|functions|e2e|tests?|\.github|public_html|dist)\//.test(rel) &&
+  // documentação e exemplos não são carregados por navegador nenhum
+  !/(^|\/)(docs?|documentation|examples?|samples?|fixtures?)\//.test(rel) &&
   !/(^|\/)(vite|vitest|next|tailwind|eslint|postcss|playwright|webpack|rollup)\.config\.[cm]?[jt]s$/.test(rel);
 
 const isTestPath = (rel) => /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$/.test(rel);
@@ -524,7 +560,11 @@ function runDoctor(root = process.cwd(), opts = {}) {
     // um manda um "pagamento aprovado" falso e leva o produto. Só acusa arquivo que
     // parece a ROTA HTTP (lê o corpo da requisição); handler separado, que recebe o
     // evento já verificado por outro arquivo, não entra (evita falso positivo).
-    if (!isTest && /checkout\.session\.completed|payment_intent\.succeeded|invoice\.paid/.test(text) && /stripe/i.test(text) &&
+    // "Tratar" o evento = comparar o tipo (`case`, `event.type ===`) ou ter um mapa de
+    // handlers. Só LISTAR os nomes (ex: `enabled_events: [...]` numa função que
+    // configura o webhook no Stripe) não é receber webhook — acusar isso foi falso
+    // positivo real no SERAFIM13 (sync-stripe-prices).
+    if (!isTest && STRIPE_EVENT_HANDLED_RE.test(text) && /stripe/i.test(text) &&
         /req(uest)?\.(json|text|body)\b|Deno\.serve|export\s+(async\s+)?function\s+POST|\.post\(/.test(text) &&
         !/constructEvent(Async)?\s*\(/.test(text)) {
       stripeUnverified.push(`${rel}:1`);
@@ -545,8 +585,13 @@ function runDoctor(root = process.cwd(), opts = {}) {
     const ih = /dangerouslySetInnerHTML/.exec(text);
     if (ih) innerHtml.push(`${rel}:${lineOf(text, ih.index)}`);
 
-    const ev = /\beval\(|new Function\(/.exec(text);
-    if (ev && !isTest) evalHits.push(`${rel}:${lineOf(text, ev.index)}`);
+    if (!isTest) {
+      for (const ev of text.matchAll(/\beval\(|new Function\(/g)) {
+        if (inCommentOrString(text, ev.index)) continue; // citado em comentário/texto: não executa nada
+        evalHits.push(`${rel}:${lineOf(text, ev.index)}`);
+        break;
+      }
+    }
   }
 
   for (const [kind, { sev, where }] of secretHits) {
@@ -636,11 +681,16 @@ function runDoctor(root = process.cwd(), opts = {}) {
     }
     if (rls.uidPerRow.length) {
       add({
-        id: 'rls-uid-per-row', severity: 'medium',
-        title: `${rls.uidPerRow.length} policy(s) usam auth.uid() sem (select ...)`,
+        id: 'rls-uid-per-row', severity: rls.dynamicPolicies ? 'low' : 'medium',
+        title: rls.dynamicPolicies
+          ? `Até ${rls.uidPerRow.length} policy(s) podem usar auth.uid() sem (select ...) — confirme no banco`
+          : `${rls.uidPerRow.length} policy(s) usam auth.uid() sem (select ...)`,
         files: ['supabase/migrations/'], where: rls.uidPerRow.slice(0, 6),
-        why: 'auth.uid() puro é reavaliado em CADA linha da consulta. Em tabela grande, vira lentidão e timeout. (Conta só a versão mais recente de cada policy: as que uma migration posterior já recriou corretamente não entram.)',
-        fix: 'Recrie essas policies usando `(select auth.uid())`.',
+        why: 'auth.uid() puro é reavaliado em CADA linha da consulta. Em tabela grande, vira lentidão e timeout. (Conta só a versão mais recente de cada policy: as que uma migration posterior já recriou corretamente não entram.)' +
+          (rls.dynamicPolicies ? ' ATENÇÃO: há migration que recria policies em loop (pg_policies + EXECUTE). O estado final delas não está no texto das migrations, então este número pode estar defasado — o banco real é a fonte de verdade.' : ''),
+        fix: rls.dynamicPolicies
+          ? 'Confirme no banco real: `select tablename, policyname from pg_policies where schemaname = \'public\' and qual ~* \'auth\\.uid\\(\\)\' and qual !~* \'\\(\\s*select\\s+auth\\.uid\\(\\)\\s*\\)\';` — se voltar vazio, não há nada a fazer. Se voltar linhas, recrie essas policies usando `(select auth.uid())`.'
+          : 'Recrie essas policies usando `(select auth.uid())`.',
         prompt: `Estas policies de RLS usam auth.uid() direto: ${rls.uidPerRow.slice(0, 6).join(', ')}. Crie uma migration que as recrie usando (select auth.uid()), sem mudar a regra de acesso, com script DOWN.`,
       });
     }

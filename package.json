@@ -1,6 +1,6 @@
 {
   "name": "protocolo-serafim-um-setup",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Faz as perguntas que quem programa com IA ainda não sabe fazer: doctor com nota 0-100 e pergunta pronta pra IA em cada problema, memória persistente, CLAUDE.md com checagens obrigatórias, deploy e health check gerados pela stack. Versão gratuita (MIT) do Protocolo Serafim UM.",
   "main": "setup.js",
   "bin": "./setup.js",
