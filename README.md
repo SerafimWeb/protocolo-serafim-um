@@ -25,6 +25,9 @@ projetos feitos com IA:
 
 O valor de um segredo encontrado **nunca** é impresso — só o tipo e onde está.
 
+Tem uma pasta que não é sua (código legado, terceiros)? Liste-a, uma por
+linha, num arquivo `.doctorignore` na raiz e o doctor não a varre.
+
 ## Instalar o protocolo no projeto
 
 ```bash
