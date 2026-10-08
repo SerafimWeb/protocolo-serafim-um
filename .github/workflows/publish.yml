@@ -47,5 +47,22 @@ jobs:
             exit 0
           fi
           npm install -g npm@latest
-          npm publish --access public
-          echo "::notice::$NAME@$VERSION publicado no npm"
+
+          # Publica o .tgz do `npm pack`, NUNCA a pasta: `npm publish` direto da
+          # pasta descarta o campo "bin" em silêncio (reproduzido no Windows E no
+          # runner Linux, npm 11.x) e o `npx` sairia do ar sem erro nenhum.
+          FILE=$(npm pack --silent)
+          tar -xOzf "$FILE" package/package.json | node -e "
+            const p = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+            if (!p.bin) { console.error('::error::tarball sem o campo bin — abortado'); process.exit(1); }"
+
+          if ! npm publish "./$FILE" --access public; then
+            echo "::error::npm publish falhou. Se o erro acima for E404 ou ENEEDAUTH, falta configurar o Trusted Publisher: npmjs.com → pacote $NAME → Settings → Trusted Publisher → GitHub Actions → org SerafimWeb, repo protocolo-serafim-um, workflow publish.yml."
+            exit 1
+          fi
+
+          # Prova: o que o registro tem agora precisa ter o bin.
+          sleep 5
+          BIN=$(npm view "$NAME@$VERSION" bin --json 2>/dev/null || true)
+          [ -n "$BIN" ] && [ "$BIN" != "undefined" ] || { echo "::error::$NAME@$VERSION publicado SEM bin — npx não vai funcionar"; exit 1; }
+          echo "::notice::$NAME@$VERSION publicado no npm com bin=$BIN"
