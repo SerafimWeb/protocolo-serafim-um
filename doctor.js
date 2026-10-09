@@ -1004,7 +1004,11 @@ function writeReports(root, report) {
   if (report.notAProject) return written; // nada a registrar numa pasta que não é projeto
   for (const dir of findMemoryDirs(root)) {
     const p = path.join(root, dir, 'DIAGNOSTICO.md');
-    try { fs.writeFileSync(p, toMarkdown(report), 'utf8'); written.push(path.relative(root, p)); } catch { /* sem permissão: segue */ }
+    try {
+      fs.writeFileSync(p, toMarkdown(report), 'utf8');
+      written.push(path.relative(root, p));
+      ensureGitignored(root, `${dir}/DIAGNOSTICO.md`);
+    } catch { /* sem permissão: segue */ }
   }
   if (exists(path.join(root, 'src', 'qa', 'Watchdog.tsx'))) {
     const p = path.join(root, 'src', 'qa', 'doctor-report.json');
@@ -1017,18 +1021,24 @@ function writeReports(root, report) {
   return written;
 }
 
-// O relatório do Watchdog lista ONDE estão as fraquezas do projeto (sem os
-// valores dos segredos, mas com arquivo e tipo). Num `git add .` distraído ele
-// iria pro repositório — e se o repo for público, vira mapa pra quem ataca.
-// Então o doctor se encarrega de manter o arquivo fora do git, sem o usuário
-// precisar saber disso. Aditivo: só acrescenta uma linha, nunca reescreve.
+// Os relatórios (o JSON do Watchdog e o DIAGNOSTICO.md da IA) listam ONDE estão
+// as fraquezas do projeto (sem os valores dos segredos, mas com arquivo e tipo).
+// Num `git add .` distraído iriam pro repositório — e se o repo for público,
+// viram mapa pra quem ataca. Então o doctor se encarrega de manter os dois
+// fora do git, sem o usuário precisar saber disso. A IA lê o DIAGNOSTICO.md do
+// disco, então não precisa dele versionado. Aditivo: só acrescenta uma linha,
+// nunca reescreve.
+const GITIGNORE_NOTE = '# Protocolo Serafim UM — relatório do doctor (mapa de fraquezas: não versionar)';
+
 function ensureGitignored(root, relPath) {
   const gi = path.join(root, '.gitignore');
   const current = readText(gi) || '';
   const already = current.split(/\r?\n/).some((l) => l.trim().replace(/^\//, '') === relPath);
   if (already) return;
   const sep = current && !/\n$/.test(current) ? '\n' : '';
-  fs.appendFileSync(gi, `${sep}\n# Protocolo Serafim UM — relatório do doctor (mapa de fraquezas: não versionar)\n${relPath}\n`, 'utf8');
+  // Um só comentário, mesmo com dois relatórios: a segunda linha entra sem repeti-lo.
+  const header = current.includes(GITIGNORE_NOTE) ? '' : `\n${GITIGNORE_NOTE}\n`;
+  fs.appendFileSync(gi, `${sep}${header}${relPath}\n`, 'utf8');
 }
 
 function cli(argv) {

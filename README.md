@@ -44,7 +44,9 @@ descobrir. Em um minuto:
   e histórico de decisões — a IA começa cada sessão sabendo onde parou.
 - **Diagnóstico pra IA**: o resultado do doctor vai pra
   `.seuprojeto/DIAGNOSTICO.md`, e a IA avisa sozinha se houver algo crítico
-  antes de começar a próxima tarefa.
+  antes de começar a próxima tarefa. Esse arquivo lista onde estão as
+  fraquezas do projeto, então o doctor o põe no `.gitignore` sozinho (a IA lê
+  do disco; em outro computador, rode o doctor de novo).
 - **Deploy e health check gerados** pela stack detectada (Vercel, Netlify,
   Railway ou Hostinger/FTP; Next.js, Express ou Supabase Edge Function) e
   `.env.example` com o prefixo público certo pro seu framework.
