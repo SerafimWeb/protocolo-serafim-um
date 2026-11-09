@@ -71,7 +71,7 @@ npx protocolo-serafim-um-setup --check   # tem versão nova?
   o build — configurados automaticamente no formato do seu projeto.
 - **Skills reais pro Claude Code**: AI Red Team, 5-Why Debug, Test-as-You-Build.
 - Os 7 módulos de auditoria, o MCP Arsenal, o checklist de 47 itens e o
-  documento completo: 17 regras absolutas e 23 skills, cada uma com o
+  documento completo: 18 regras absolutas e 23 skills, cada uma com o
   incidente real que a originou.
 
 **https://serafimweb.com/serafim13/protocolo-um**

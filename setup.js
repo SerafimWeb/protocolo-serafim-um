@@ -31,7 +31,7 @@
  * via pipe/redirect, na mesma ordem das perguntas.
  *
  * Pacote completo (WATCHDOG.tsx, módulos de auditoria, MCP Arsenal,
- * enforcement pack, 3 skills reais, checklist de 47 itens, as 17 regras +
+ * enforcement pack, 3 skills reais, checklist de 47 itens, as 18 regras +
  * 23 skills documentadas): https://serafimweb.com/serafim13/protocolo-um
  */
 
